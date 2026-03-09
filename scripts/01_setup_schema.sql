@@ -1,7 +1,9 @@
 -- =============================================================================
 -- Dynamic Pricing Data Model — Schema Setup
--- Purpose: Creates the database, schema, and all tables for a GNN-based
+-- Purpose: Creates the database, schema, and all tables for a Two-Tower
 --          dynamic pricing system on Snowflake.
+-- Tables:  DIM_PRODUCT (200 products), DIM_STORE (50 stores),
+--          FACT_SALES_DAILY (~2.5M daily sales records)
 -- Usage:   Run this script end-to-end in a Snowflake worksheet or via SnowSQL.
 -- =============================================================================
 
@@ -34,15 +36,6 @@ CREATE OR REPLACE TABLE DIM_STORE (
     lon         NUMBER(9,6)    NOT NULL
 );
 
-CREATE OR REPLACE TABLE DIM_CALENDAR (
-    date          DATE          PRIMARY KEY,
-    day_of_week   VARCHAR(10)   NOT NULL,
-    week          INT           NOT NULL,
-    month         INT           NOT NULL,
-    holiday_flag  BOOLEAN       NOT NULL DEFAULT FALSE,
-    season        VARCHAR(20)   NOT NULL
-);
-
 -- ─── Fact Tables ─────────────────────────────────────────────────────────────
 
 CREATE OR REPLACE TABLE FACT_SALES_DAILY (
@@ -59,72 +52,6 @@ CREATE OR REPLACE TABLE FACT_SALES_DAILY (
     PRIMARY KEY (product_id, store_id, date),
 
     FOREIGN KEY (product_id) REFERENCES DIM_PRODUCT(product_id),
-    FOREIGN KEY (store_id)   REFERENCES DIM_STORE(store_id),
-    FOREIGN KEY (date)       REFERENCES DIM_CALENDAR(date)
+    FOREIGN KEY (store_id)   REFERENCES DIM_STORE(store_id)
 )
 CLUSTER BY (date, product_id);
-
-CREATE OR REPLACE TABLE FACT_COMPETITOR_PRICE_DAILY (
-    competitor_id    INT           NOT NULL,
-    product_id       INT           NOT NULL,
-    store_id         INT           NOT NULL,
-    date             DATE          NOT NULL,
-    competitor_price NUMBER(10,2)  NOT NULL,
-
-    PRIMARY KEY (competitor_id, product_id, store_id, date),
-
-    FOREIGN KEY (product_id) REFERENCES DIM_PRODUCT(product_id),
-    FOREIGN KEY (store_id)   REFERENCES DIM_STORE(store_id),
-    FOREIGN KEY (date)       REFERENCES DIM_CALENDAR(date)
-);
-
-CREATE OR REPLACE TABLE FACT_EVENTS (
-    event_id            INT           PRIMARY KEY,
-    store_id            INT           NOT NULL,
-    date                DATE          NOT NULL,
-    event_type          VARCHAR(100)  NOT NULL,
-    event_intensity     NUMBER(3,2)   NOT NULL,
-    event_duration_days INT           NOT NULL DEFAULT 1,
-
-    FOREIGN KEY (store_id) REFERENCES DIM_STORE(store_id),
-    FOREIGN KEY (date)     REFERENCES DIM_CALENDAR(date)
-);
-
--- ─── Graph Edge Tables ───────────────────────────────────────────────────────
-
-CREATE OR REPLACE TABLE GRAPH_PRODUCT_PRODUCT_EDGE (
-    src_product_id  INT          NOT NULL,
-    dst_product_id  INT          NOT NULL,
-    edge_type       VARCHAR(50)  NOT NULL,
-    weight          NUMBER(5,4)  NOT NULL,
-    snapshot_date   DATE         NOT NULL,
-
-    PRIMARY KEY (src_product_id, dst_product_id, edge_type, snapshot_date),
-
-    FOREIGN KEY (src_product_id) REFERENCES DIM_PRODUCT(product_id),
-    FOREIGN KEY (dst_product_id) REFERENCES DIM_PRODUCT(product_id)
-);
-
-CREATE OR REPLACE TABLE GRAPH_STORE_STORE_EDGE (
-    src_store_id   INT          NOT NULL,
-    dst_store_id   INT          NOT NULL,
-    weight         NUMBER(5,4)  NOT NULL,
-    snapshot_date  DATE         NOT NULL,
-
-    PRIMARY KEY (src_store_id, dst_store_id, snapshot_date),
-
-    FOREIGN KEY (src_store_id) REFERENCES DIM_STORE(store_id),
-    FOREIGN KEY (dst_store_id) REFERENCES DIM_STORE(store_id)
-);
-
-CREATE OR REPLACE TABLE GRAPH_PRODUCT_STORE_EDGE (
-    product_id     INT          NOT NULL,
-    store_id       INT          NOT NULL,
-    weight         NUMBER(5,4)  NOT NULL,
-    snapshot_date  DATE         NOT NULL,
-
-    PRIMARY KEY (product_id, store_id, snapshot_date),
-
-    FOREIGN KEY (product_id) REFERENCES DIM_PRODUCT(product_id),
-    FOREIGN KEY (store_id)   REFERENCES DIM_STORE(store_id)
-);

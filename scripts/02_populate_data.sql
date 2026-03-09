@@ -1,49 +1,15 @@
 -- =============================================================================
 -- Dynamic Pricing Data Model — Data Population
--- Purpose: Populates all tables with realistic synthetic data for a GNN-based
+-- Purpose: Populates all tables with realistic synthetic data for a Two-Tower
 --          dynamic pricing system.
--- Scale:   ~200 products, 50 stores, 365 days, ~2.5M+ fact rows
+-- Scale:   200 products, 50 stores, 365 days, ~2.5M+ fact rows
 -- Domain:  General retail (electronics, apparel, home goods, food, personal care)
 -- Usage:   Run after 01_setup_schema.sql on the same Snowflake account.
 -- =============================================================================
 
 USE SCHEMA DYNAMIC_PRICING.PRICING_MODEL;
 
--- ─── DIM_CALENDAR (365 rows: 2025-01-01 to 2025-12-31) ──────────────────────
-
-INSERT INTO DIM_CALENDAR (date, day_of_week, week, month, holiday_flag, season)
-SELECT
-    dt,
-    DAYNAME(dt),
-    WEEKOFYEAR(dt),
-    MONTH(dt),
-    CASE
-        WHEN dt IN (
-            '2025-01-01',  -- New Year's Day
-            '2025-01-20',  -- MLK Day
-            '2025-02-17',  -- Presidents' Day
-            '2025-05-26',  -- Memorial Day
-            '2025-07-04',  -- Independence Day
-            '2025-09-01',  -- Labor Day
-            '2025-10-13',  -- Columbus Day
-            '2025-11-11',  -- Veterans Day
-            '2025-11-27',  -- Thanksgiving
-            '2025-12-25'   -- Christmas
-        ) THEN TRUE
-        ELSE FALSE
-    END AS holiday_flag,
-    CASE
-        WHEN MONTH(dt) IN (3, 4, 5)   THEN 'Spring'
-        WHEN MONTH(dt) IN (6, 7, 8)   THEN 'Summer'
-        WHEN MONTH(dt) IN (9, 10, 11) THEN 'Fall'
-        ELSE 'Winter'
-    END AS season
-FROM (
-    SELECT DATEADD(day, ROW_NUMBER() OVER (ORDER BY 1) - 1, '2025-01-01'::DATE) AS dt
-    FROM TABLE(GENERATOR(ROWCOUNT => 365))
-);
-
--- ─── DIM_PRODUCT (200 rows) ──────────────────────────────────────────────────
+-- ─── DIM_PRODUCT (200 rows) ────────────────────────────────────────────────
 
 INSERT INTO DIM_PRODUCT (product_id, category, subcategory, brand, cost, base_price, size, weight, launch_date)
 WITH product_defs AS (
@@ -259,7 +225,7 @@ WITH product_defs AS (
 )
 SELECT * FROM product_defs;
 
--- ─── DIM_STORE (50 rows) ────────────────────────────────────────────────────
+-- ─── DIM_STORE (50 rows) ───────────────────────────────────────────────────
 
 INSERT INTO DIM_STORE (store_id, region, city, store_type, lat, lon)
 VALUES
@@ -323,34 +289,47 @@ VALUES
     (49, 'Pacific', 'Anchorage',      'retail',    61.218056, -149.900278),
     (50, 'Pacific', 'Fresno',         'online',    36.737798, -119.787125);
 
--- ─── FACT_SALES_DAILY (~2.5M rows) ──────────────────────────────────────────
+-- ─── FACT_SALES_DAILY (~2.5M rows) ────────────────────────────────────────
 -- Generate sales for ~70% of product-store-date combos with realistic patterns.
--- Price varies ±15% around base_price; units follow category-dependent means;
+-- Price varies +/-15% around base_price; units follow category-dependent means;
 -- inventory and returns are proportional.
 
 INSERT INTO FACT_SALES_DAILY (
     product_id, store_id, date, selling_price, cost_at_sale,
     units_sold, revenue, inventory_start_of_day, returns_units
 )
-WITH all_combos AS (
+WITH dates AS (
+    SELECT DATEADD(day, ROW_NUMBER() OVER (ORDER BY 1) - 1, '2025-01-01'::DATE) AS dt,
+           DAYNAME(DATEADD(day, ROW_NUMBER() OVER (ORDER BY 1) - 1, '2025-01-01'::DATE)) AS day_of_week,
+           CASE
+               WHEN MONTH(DATEADD(day, ROW_NUMBER() OVER (ORDER BY 1) - 1, '2025-01-01'::DATE)) IN (3,4,5) THEN 'Spring'
+               WHEN MONTH(DATEADD(day, ROW_NUMBER() OVER (ORDER BY 1) - 1, '2025-01-01'::DATE)) IN (6,7,8) THEN 'Summer'
+               WHEN MONTH(DATEADD(day, ROW_NUMBER() OVER (ORDER BY 1) - 1, '2025-01-01'::DATE)) IN (9,10,11) THEN 'Fall'
+               ELSE 'Winter'
+           END AS season,
+           DATEADD(day, ROW_NUMBER() OVER (ORDER BY 1) - 1, '2025-01-01'::DATE) IN (
+               '2025-01-01','2025-01-20','2025-02-17','2025-05-26','2025-07-04',
+               '2025-09-01','2025-10-13','2025-11-11','2025-11-27','2025-12-25'
+           ) AS holiday_flag
+    FROM TABLE(GENERATOR(ROWCOUNT => 365))
+),
+all_combos AS (
     SELECT
         p.product_id,
         s.store_id,
-        c.date,
+        d.dt AS date,
         p.base_price,
         p.cost,
         p.category,
-        c.season,
-        c.holiday_flag,
-        c.day_of_week,
-        -- Random seed per combo for deterministic-ish generation
-        ABS(HASH(p.product_id || '-' || s.store_id || '-' || c.date)) AS h
+        d.season,
+        d.holiday_flag,
+        d.day_of_week,
+        ABS(HASH(p.product_id || '-' || s.store_id || '-' || d.dt)) AS h
     FROM DIM_PRODUCT p
     CROSS JOIN DIM_STORE s
-    CROSS JOIN DIM_CALENDAR c
+    CROSS JOIN dates d
 ),
 filtered AS (
-    -- Keep ~70% of combos (simulates not every product sold everywhere every day)
     SELECT *
     FROM all_combos
     WHERE MOD(h, 100) < 70
@@ -360,11 +339,8 @@ with_price AS (
         product_id,
         store_id,
         date,
-        -- selling_price: base_price * (0.85 to 1.15) using hash for variation
         ROUND(base_price * (0.85 + (MOD(h, 3000) / 10000.0)), 2) AS selling_price,
-        -- cost_at_sale: cost * (0.97 to 1.03)
         ROUND(cost * (0.97 + (MOD(h / 7, 600) / 10000.0)), 2) AS cost_at_sale,
-        -- units_sold: category-dependent base + variation
         GREATEST(1, CASE
             WHEN category = 'Electronics'     THEN 2  + MOD(h / 13, 15)
             WHEN category = 'Apparel'         THEN 5  + MOD(h / 17, 25)
@@ -373,18 +349,14 @@ with_price AS (
             WHEN category = 'Personal Care'   THEN 8  + MOD(h / 29, 40)
             ELSE 3 + MOD(h / 11, 20)
         END
-        -- Seasonal boost
         + CASE
             WHEN season = 'Winter' AND category IN ('Apparel', 'Home Goods') THEN MOD(h / 31, 10)
             WHEN season = 'Summer' AND category IN ('Food & Beverage', 'Personal Care') THEN MOD(h / 37, 12)
             ELSE 0
         END
-        -- Holiday boost
         + CASE WHEN holiday_flag THEN MOD(h / 41, 15) ELSE 0 END
-        -- Weekend boost
         + CASE WHEN day_of_week IN ('Sat', 'Sun') THEN MOD(h / 43, 8) ELSE 0 END
         ) AS units_sold,
-        -- Inventory: 0-500 with ~5% stockout
         CASE
             WHEN MOD(h, 20) = 0 THEN 0
             ELSE 10 + MOD(h / 47, 490)
@@ -401,208 +373,5 @@ SELECT
     units_sold,
     ROUND(selling_price * units_sold, 2) AS revenue,
     inventory_start_of_day,
-    -- returns: ~3% of units_sold
     CASE WHEN MOD(h / 53, 33) = 0 THEN GREATEST(1, FLOOR(units_sold * 0.03)) ELSE 0 END AS returns_units
 FROM with_price;
-
--- ─── FACT_COMPETITOR_PRICE_DAILY (~500K rows) ────────────────────────────────
--- 3 competitors, covering ~50% of products (more competitive categories)
-
-INSERT INTO FACT_COMPETITOR_PRICE_DAILY (
-    competitor_id, product_id, store_id, date, competitor_price
-)
-WITH competitor_products AS (
-    -- Competitors focus on Electronics, Food & Beverage, Personal Care
-    SELECT p.product_id, p.base_price
-    FROM DIM_PRODUCT p
-    WHERE p.category IN ('Electronics', 'Food & Beverage', 'Personal Care')
-),
-competitors AS (
-    SELECT column1 AS competitor_id FROM VALUES (1), (2), (3)
-),
-combos AS (
-    SELECT
-        comp.competitor_id,
-        cp.product_id,
-        s.store_id,
-        c.date,
-        cp.base_price,
-        ABS(HASH(comp.competitor_id || '-' || cp.product_id || '-' || s.store_id || '-' || c.date)) AS h
-    FROM competitors comp
-    CROSS JOIN competitor_products cp
-    CROSS JOIN DIM_STORE s
-    CROSS JOIN DIM_CALENDAR c
-)
-SELECT
-    competitor_id,
-    product_id,
-    store_id,
-    date,
-    -- competitor_price: our base_price * (0.90 to 1.10)
-    ROUND(base_price * (0.90 + (MOD(h, 2000) / 10000.0)), 2) AS competitor_price
-FROM combos
-WHERE MOD(h, 100) < 4;  -- ~4% sampling to get ~500K rows from huge cross join
-
--- ─── FACT_EVENTS (~500 rows) ─────────────────────────────────────────────────
-
-INSERT INTO FACT_EVENTS (event_id, store_id, date, event_type, event_intensity, event_duration_days)
-WITH event_types AS (
-    SELECT column1 AS event_type FROM VALUES
-        ('weather_shock'), ('sports_event'), ('concert'),
-        ('festival'), ('local_holiday'), ('construction')
-),
-candidates AS (
-    SELECT
-        ROW_NUMBER() OVER (ORDER BY s.store_id, c.date, et.event_type) AS event_id,
-        s.store_id,
-        c.date,
-        et.event_type,
-        ABS(HASH(s.store_id || '-' || c.date || '-' || et.event_type)) AS h
-    FROM DIM_STORE s
-    CROSS JOIN DIM_CALENDAR c
-    CROSS JOIN event_types et
-)
-SELECT
-    event_id,
-    store_id,
-    date,
-    event_type,
-    ROUND(0.10 + (MOD(h, 8500) / 10000.0), 2) AS event_intensity,
-    1 + MOD(h / 59, 5) AS event_duration_days
-FROM candidates
-WHERE MOD(h, 220) = 0  -- ~0.45% to get ~500 events
-LIMIT 500;
-
--- ─── GRAPH_PRODUCT_PRODUCT_EDGE (~2000 rows) ─────────────────────────────────
--- Edge types: same_category, substitute, complement, cannibalization
-
-INSERT INTO GRAPH_PRODUCT_PRODUCT_EDGE (src_product_id, dst_product_id, edge_type, weight, snapshot_date)
-WITH
-
--- same_category: products in the same subcategory
-same_cat AS (
-    SELECT
-        a.product_id AS src_product_id,
-        b.product_id AS dst_product_id,
-        'same_category' AS edge_type,
-        ROUND(0.70 + (MOD(ABS(HASH(a.product_id || '-' || b.product_id)), 3000) / 10000.0), 4) AS weight,
-        '2025-01-01'::DATE AS snapshot_date
-    FROM DIM_PRODUCT a
-    JOIN DIM_PRODUCT b
-        ON a.subcategory = b.subcategory
-        AND a.product_id < b.product_id
-),
-
--- substitute: same subcategory + similar price band (within 30%)
-substitute AS (
-    SELECT
-        a.product_id AS src_product_id,
-        b.product_id AS dst_product_id,
-        'substitute' AS edge_type,
-        ROUND(0.50 + (MOD(ABS(HASH(a.product_id || '-' || b.product_id || '-sub')), 4000) / 10000.0), 4) AS weight,
-        '2025-01-01'::DATE AS snapshot_date
-    FROM DIM_PRODUCT a
-    JOIN DIM_PRODUCT b
-        ON a.subcategory = b.subcategory
-        AND a.product_id < b.product_id
-        AND a.brand != b.brand
-        AND ABS(a.base_price - b.base_price) / GREATEST(a.base_price, b.base_price) < 0.30
-),
-
--- complement: cross-category pairs (phone + accessories, apparel + personal care)
-complement AS (
-    SELECT
-        a.product_id AS src_product_id,
-        b.product_id AS dst_product_id,
-        'complement' AS edge_type,
-        ROUND(0.30 + (MOD(ABS(HASH(a.product_id || '-' || b.product_id || '-comp')), 4000) / 10000.0), 4) AS weight,
-        '2025-01-01'::DATE AS snapshot_date
-    FROM DIM_PRODUCT a
-    JOIN DIM_PRODUCT b ON a.product_id < b.product_id
-    WHERE (a.subcategory = 'Phones' AND b.subcategory = 'Accessories')
-       OR (a.subcategory = 'Laptops' AND b.subcategory = 'Accessories')
-       OR (a.subcategory = 'Tablets' AND b.subcategory = 'Accessories')
-       OR (a.subcategory IN ('T-Shirts','Jeans','Jackets') AND b.subcategory = 'Shoes')
-       OR (a.subcategory = 'Skincare' AND b.subcategory = 'Body Wash')
-       OR (a.subcategory = 'Haircare' AND b.subcategory = 'Body Wash')
-       OR (a.subcategory = 'Snacks' AND b.subcategory = 'Beverages')
-       OR (a.subcategory = 'Bakery' AND b.subcategory = 'Dairy')
-       OR (a.subcategory = 'Bedding' AND b.subcategory = 'Lighting')
-       OR (a.subcategory = 'Furniture' AND b.subcategory = 'Decor')
-),
-
--- cannibalization: same brand + same subcategory
-cannibalize AS (
-    SELECT
-        a.product_id AS src_product_id,
-        b.product_id AS dst_product_id,
-        'cannibalization' AS edge_type,
-        ROUND(0.40 + (MOD(ABS(HASH(a.product_id || '-' || b.product_id || '-cann')), 4000) / 10000.0), 4) AS weight,
-        '2025-01-01'::DATE AS snapshot_date
-    FROM DIM_PRODUCT a
-    JOIN DIM_PRODUCT b
-        ON a.brand = b.brand
-        AND a.subcategory = b.subcategory
-        AND a.product_id < b.product_id
-),
-
-all_edges AS (
-    SELECT * FROM same_cat
-    UNION ALL
-    SELECT * FROM substitute
-    UNION ALL
-    SELECT * FROM complement
-    UNION ALL
-    SELECT * FROM cannibalize
-)
-SELECT * FROM all_edges;
-
--- ─── GRAPH_STORE_STORE_EDGE (~200 rows) ──────────────────────────────────────
--- Same-region pairs with weight inversely proportional to approximate distance
-
-INSERT INTO GRAPH_STORE_STORE_EDGE (src_store_id, dst_store_id, weight, snapshot_date)
-SELECT
-    a.store_id AS src_store_id,
-    b.store_id AS dst_store_id,
-    -- Weight: inverse of haversine-ish distance, normalized to 0-1
-    -- Same city ≈ 0.95+, same region near ≈ 0.5-0.8, same region far ≈ 0.2-0.5
-    ROUND(GREATEST(0.10,
-        1.0 - (SQRT(POWER(a.lat - b.lat, 2) + POWER(a.lon - b.lon, 2)) / 30.0)
-    ), 4) AS weight,
-    '2025-01-01'::DATE AS snapshot_date
-FROM DIM_STORE a
-JOIN DIM_STORE b
-    ON a.region = b.region
-    AND a.store_id < b.store_id;
-
--- ─── GRAPH_PRODUCT_STORE_EDGE (~5000 rows) ───────────────────────────────────
--- Top product-store pairs by sales volume share
-
-INSERT INTO GRAPH_PRODUCT_STORE_EDGE (product_id, store_id, weight, snapshot_date)
-WITH store_product_sales AS (
-    SELECT
-        product_id,
-        store_id,
-        SUM(units_sold) AS total_units
-    FROM FACT_SALES_DAILY
-    GROUP BY product_id, store_id
-),
-max_units AS (
-    SELECT MAX(total_units) AS max_u FROM store_product_sales
-),
-ranked AS (
-    SELECT
-        s.product_id,
-        s.store_id,
-        ROUND(s.total_units / m.max_u, 4) AS weight,
-        ROW_NUMBER() OVER (ORDER BY s.total_units DESC) AS rn
-    FROM store_product_sales s
-    CROSS JOIN max_units m
-)
-SELECT
-    product_id,
-    store_id,
-    weight,
-    '2025-01-01'::DATE AS snapshot_date
-FROM ranked
-WHERE rn <= 5000;
