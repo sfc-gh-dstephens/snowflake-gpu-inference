@@ -37,5 +37,5 @@ DROP TABLE IF EXISTS DYNAMIC_PRICING.PRICING_MODEL.DIM_PRODUCT;
 -- ─── Schema ───────────────────────────────────────────────────────────────────
 DROP SCHEMA IF EXISTS DYNAMIC_PRICING.PRICING_MODEL;
 
-─── Database (uncomment to fully remove everything) ──────────────────────────
+-- ─── Database (uncomment to fully remove everything) ──────────────────────────
 DROP DATABASE IF EXISTS DYNAMIC_PRICING;
