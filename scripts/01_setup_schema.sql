@@ -55,3 +55,12 @@ CREATE OR REPLACE TABLE FACT_SALES_DAILY (
     FOREIGN KEY (store_id)   REFERENCES DIM_STORE(store_id)
 )
 CLUSTER BY (date, product_id);
+
+-- ─── Compute Pool for GPU Inference ────────────────────────────────────────
+
+CREATE COMPUTE POOL IF NOT EXISTS PRICING_GPU_POOL
+    MIN_NODES = 1
+    MAX_NODES = 3
+    INSTANCE_FAMILY = GPU_NV_S
+    AUTO_SUSPEND_SECS = 300
+    COMMENT = 'GPU compute pool for Two-Tower pricing model inference';
